@@ -46,7 +46,8 @@ INSTALLED_APPS = [
     'corsheaders',
     'rest_framework',
     'whitenoise.runserver_nostatic',
-    'timetable'
+    'timetable',
+    'drf_yasg',
 ]
 
 MIDDLEWARE = [
