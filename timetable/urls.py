@@ -43,4 +43,12 @@ urlpatterns = [
     path('api/timetable/slots/<int:pk>/', views.TimeTableSlotDetailView.as_view(), name='timetable_slot_detail'),
     path('api/timetable/generate/', views.GenerateTimetableView.as_view(), name='generate_timetable'),
     path('api/timetable/stats/', views.TimetableStatsView.as_view(), name='timetable_stats'),
+    path('api/school/period-timing/', views.SchoolPeriodTimingView.as_view(), name='school_period_timing'),
+    path('api/timetable/clear/', views.ClearTimetableView.as_view(), name='clear_timetable'),
+    
+    # Class subject management
+    path('api/classes/<int:class_id>/subjects/', views.ClassSubjectManagementView.as_view(), name='class_subject_management'),
+    
+    # Teacher workload analysis
+    path('api/teachers/workload-analysis/', views.TeacherWorkloadAnalysisView.as_view(), name='teacher_workload_analysis'),
 ] 

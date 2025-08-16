@@ -199,39 +199,63 @@ class SchoolProfileView(generics.RetrieveUpdateAPIView):
     permission_classes = [IsAuthenticated]
 
     def get_object(self):
-        # Get or create school profile for the authenticated user
-        profile, created = SchoolProfile.objects.get_or_create(user=self.request.user)
-        return profile
+        # Only get; do NOT auto-create since schools already have their code
+        return SchoolProfile.objects.get(user=self.request.user)
 
     def get(self, request, *args, **kwargs):
         """Get school profile"""
-        profile = self.get_object()
-        serializer = self.get_serializer(profile)
-        return Response(serializer.data)
+        try:
+            profile = self.get_object()
+            serializer = self.get_serializer(profile)
+            return Response(serializer.data)
+        except SchoolProfile.DoesNotExist:
+            return Response({'error': 'School profile not found. Please create it by updating with school_name and school_code.'}, status=status.HTTP_404_NOT_FOUND)
+        except Exception as e:
+            return Response({'error': f'Failed to retrieve school profile: {str(e)}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
     def put(self, request, *args, **kwargs):
-        """Update school profile"""
-        profile = self.get_object()
-        serializer = self.get_serializer(profile, data=request.data, partial=False)
-        if serializer.is_valid():
-            serializer.save()
-            return Response({
-                'message': 'School profile updated successfully',
-                'data': serializer.data
-            })
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        """Create or update school profile (full update)"""
+        try:
+            try:
+                profile = self.get_object()
+                serializer = self.get_serializer(profile, data=request.data, partial=False)
+                action = 'updated'
+            except SchoolProfile.DoesNotExist:
+                serializer = self.get_serializer(data=request.data)
+                action = 'created'
+
+            if serializer.is_valid():
+                if action == 'created':
+                    # Create with current user
+                    profile = SchoolProfile.objects.create(user=request.user, **serializer.validated_data)
+                    data = self.get_serializer(profile).data
+                else:
+                    profile = serializer.save()
+                    data = serializer.data
+                return Response({'message': f'School profile {action} successfully', 'data': data})
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        except Exception as e:
+            return Response({'error': f'Failed to update school profile: {str(e)}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
     def patch(self, request, *args, **kwargs):
-        """Partially update school profile"""
-        profile = self.get_object()
-        serializer = self.get_serializer(profile, data=request.data, partial=True)
-        if serializer.is_valid():
-            serializer.save()
-            return Response({
-                'message': 'School profile updated successfully',
-                'data': serializer.data
-            })
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        """Partially create or update school profile"""
+        try:
+            try:
+                profile = self.get_object()
+                serializer = self.get_serializer(profile, data=request.data, partial=True)
+                action = 'updated'
+                if serializer.is_valid():
+                    profile = serializer.save()
+                    return Response({'message': f'School profile {action} successfully', 'data': serializer.data})
+            except SchoolProfile.DoesNotExist:
+                # Create with provided partial data, letting model defaults fill the rest
+                serializer = self.get_serializer(data=request.data, partial=True)
+                if serializer.is_valid():
+                    profile = SchoolProfile.objects.create(user=request.user, **serializer.validated_data)
+                    return Response({'message': 'School profile created successfully', 'data': self.get_serializer(profile).data})
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        except Exception as e:
+            return Response({'error': f'Failed to update school profile: {str(e)}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
 class TeacherListView(generics.ListCreateAPIView):
@@ -246,7 +270,11 @@ class TeacherListView(generics.ListCreateAPIView):
 
     def get_queryset(self):
         """Filter teachers by the authenticated school"""
-        return Teacher.objects.filter(school=self.request.user.school_profile)
+        try:
+            return Teacher.objects.filter(school=self.request.user.school_profile)
+        except SchoolProfile.DoesNotExist:
+            # Return empty queryset if no school profile exists
+            return Teacher.objects.none()
 
     def get_serializer_class(self):
         """Use different serializers for list and create"""
@@ -416,7 +444,11 @@ class SubjectListView(generics.ListCreateAPIView):
 
     def get_queryset(self):
         """Filter subjects by the authenticated school"""
-        return Subject.objects.filter(school=self.request.user.school_profile)
+        try:
+            return Subject.objects.filter(school=self.request.user.school_profile)
+        except SchoolProfile.DoesNotExist:
+            # Return empty queryset if no school profile exists
+            return Subject.objects.none()
 
     def get_serializer_class(self):
         """Use different serializers for list and create"""
@@ -516,7 +548,11 @@ class ClassListView(generics.ListCreateAPIView):
 
     def get_queryset(self):
         """Filter classes by the authenticated school"""
-        return Class.objects.filter(school=self.request.user.school_profile)
+        try:
+            return Class.objects.filter(school=self.request.user.school_profile)
+        except SchoolProfile.DoesNotExist:
+            # Return empty queryset if no school profile exists
+            return Class.objects.none()
 
     def get_serializer_class(self):
         """Use different serializers for list and create"""
@@ -1071,3 +1107,273 @@ class TeacherAbsenceSubstituteView(APIView):
             'message': f'Teacher {teacher.name} marked absent for {date}.',
             'substitutions': substitutions
         })
+
+
+class ClearTimetableView(generics.GenericAPIView):
+    """Clear all timetable slots for a school"""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        """Clear all timetable slots"""
+        school = request.user.school_profile
+        academic_year = request.data.get('academic_year', '')
+        
+        try:
+            with transaction.atomic():
+                # Delete all timetable slots for the school
+                slots_to_delete = TimeTableSlot.objects.filter(school=school)
+                if academic_year:
+                    slots_to_delete = slots_to_delete.filter(academic_year=academic_year)
+                
+                deleted_count = slots_to_delete.count()
+                slots_to_delete.delete()
+                
+                return Response({
+                    'message': f'Successfully cleared {deleted_count} timetable slots',
+                    'deleted_count': deleted_count,
+                    'academic_year': academic_year
+                }, status=status.HTTP_200_OK)
+                
+        except Exception as e:
+            return Response({
+                'error': f'Failed to clear timetable: {str(e)}'
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+class ClassSubjectManagementView(generics.GenericAPIView):
+    """Manage subjects for a specific class"""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, class_id):
+        """Get current subjects for a class"""
+        try:
+            class_obj = Class.objects.get(
+                id=class_id, 
+                school=request.user.school_profile
+            )
+            subjects = class_obj.subjects.filter(is_active=True)
+            serializer = SubjectListSerializer(subjects, many=True)
+            
+            return Response({
+                'class_id': class_id,
+                'class_name': f"{class_obj.class_name}-{class_obj.section}",
+                'subjects': serializer.data,
+                'available_subjects': SubjectListSerializer(
+                    Subject.objects.filter(school=request.user.school_profile, is_active=True),
+                    many=True
+                ).data
+            })
+        except Class.DoesNotExist:
+            return Response({
+                'error': 'Class not found'
+            }, status=status.HTTP_404_NOT_FOUND)
+
+    def post(self, request, class_id):
+        """Add subjects to a class"""
+        try:
+            class_obj = Class.objects.get(
+                id=class_id, 
+                school=request.user.school_profile
+            )
+            subject_ids = request.data.get('subject_ids', [])
+            
+            if not subject_ids:
+                return Response({
+                    'error': 'No subject IDs provided'
+                }, status=status.HTTP_400_BAD_REQUEST)
+            
+            # Validate that all subjects belong to the same school
+            subjects = Subject.objects.filter(
+                id__in=subject_ids,
+                school=request.user.school_profile,
+                is_active=True
+            )
+            
+            if len(subjects) != len(subject_ids):
+                return Response({
+                    'error': 'Some subjects not found or inactive'
+                }, status=status.HTTP_400_BAD_REQUEST)
+            
+            # Add subjects to class
+            class_obj.subjects.add(*subjects)
+            
+            return Response({
+                'message': f'Successfully added {len(subjects)} subjects to {class_obj.class_name}-{class_obj.section}',
+                'subjects': SubjectListSerializer(subjects, many=True).data
+            }, status=status.HTTP_200_OK)
+            
+        except Class.DoesNotExist:
+            return Response({
+                'error': 'Class not found'
+            }, status=status.HTTP_404_NOT_FOUND)
+
+    def delete(self, request, class_id):
+        """Remove subjects from a class"""
+        try:
+            class_obj = Class.objects.get(
+                id=class_id, 
+                school=request.user.school_profile
+            )
+            subject_ids = request.data.get('subject_ids', [])
+            
+            if not subject_ids:
+                return Response({
+                    'error': 'No subject IDs provided'
+                }, status=status.HTTP_400_BAD_REQUEST)
+            
+            # Remove subjects from class
+            subjects = Subject.objects.filter(id__in=subject_ids)
+            class_obj.subjects.remove(*subjects)
+            
+            return Response({
+                'message': f'Successfully removed {len(subjects)} subjects from {class_obj.class_name}-{class_obj.section}',
+                'removed_subjects': SubjectListSerializer(subjects, many=True).data
+            }, status=status.HTTP_200_OK)
+            
+        except Class.DoesNotExist:
+            return Response({
+                'error': 'Class not found'
+            }, status=status.HTTP_404_NOT_FOUND)
+
+
+class TeacherWorkloadAnalysisView(generics.GenericAPIView):
+    """Analyze teacher workload and suggest optimal distribution"""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        """Get teacher workload analysis"""
+        school = request.user.school_profile
+        teachers = Teacher.objects.filter(school=school, is_active=True)
+        
+        analysis = []
+        total_periods = 0
+        
+        for teacher in teachers:
+            # Get current workload
+            current_slots = TimeTableSlot.objects.filter(
+                school=school,
+                teacher=teacher
+            ).count()
+            
+            # Get teacher's subject assignments
+            assignments = TeacherSubjectAssignment.objects.filter(
+                teacher=teacher,
+                subject__school=school
+            ).select_related('subject')
+            
+            subjects_taught = [ass.subject.name for ass in assignments]
+            max_periods = sum(ass.max_periods_per_week for ass in assignments)
+            
+            analysis.append({
+                'teacher_id': teacher.id,
+                'teacher_name': teacher.name,
+                'subjects': subjects_taught,
+                'current_periods': current_slots,
+                'max_periods': max_periods,
+                'utilization_percentage': round((current_slots / max_periods * 100) if max_periods > 0 else 0, 2),
+                'workload_status': 'Under-utilized' if current_slots < max_periods * 0.8 else 'Optimal' if current_slots <= max_periods else 'Over-utilized'
+            })
+            
+            total_periods += current_slots
+        
+        # Calculate averages
+        if analysis:
+            avg_periods = total_periods / len(analysis)
+            for item in analysis:
+                item['deviation_from_avg'] = round(item['current_periods'] - avg_periods, 2)
+        
+        return Response({
+            'analysis': analysis,
+            'summary': {
+                'total_teachers': len(analysis),
+                'total_periods': total_periods,
+                'average_periods': round(avg_periods, 2) if analysis else 0,
+                'under_utilized': len([a for a in analysis if a['workload_status'] == 'Under-utilized']),
+                'optimal': len([a for a in analysis if a['workload_status'] == 'Optimal']),
+                'over_utilized': len([a for a in analysis if a['workload_status'] == 'Over-utilized'])
+            }
+        })
+
+
+class SchoolPeriodTimingView(generics.GenericAPIView):
+    """Manage school period timing and break periods configuration"""
+    permission_classes = [IsAuthenticated]
+    serializer_class = SchoolProfileSerializer
+
+    def get(self, request):
+        """Get current period timing configuration"""
+        try:
+            school = request.user.school_profile
+            serializer = self.get_serializer(school)
+            
+            # Add calculated period timing information
+            data = serializer.data
+            data['period_timing_info'] = {
+                'break_periods_info': school.get_break_periods_info(),
+                'sample_period_times': {}
+            }
+            
+            # Add sample period times for first few periods
+            for period in range(1, min(8, school.total_periods_per_day + 1)):
+                start_time, end_time = school.get_period_times(period)
+                data['period_timing_info']['sample_period_times'][f'period_{period}'] = {
+                    'start_time': start_time,
+                    'end_time': end_time
+                }
+            
+            return Response({
+                'message': 'Period timing configuration retrieved successfully',
+                'data': data
+            })
+        except SchoolProfile.DoesNotExist:
+            return Response({
+                'error': 'School profile not found'
+            }, status=status.HTTP_404_NOT_FOUND)
+        except Exception as e:
+            return Response({
+                'error': f'Failed to retrieve period timing: {str(e)}'
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    def put(self, request):
+        """Update period timing configuration"""
+        try:
+            school = request.user.school_profile
+            serializer = self.get_serializer(school, data=request.data, partial=True)
+            
+            if serializer.is_valid():
+                # Validate break periods configuration
+                break_periods = request.data.get('break_periods', [])
+                if break_periods:
+                    # Validate break period structure
+                    for bp in break_periods:
+                        if not all(key in bp for key in ['period', 'duration', 'name']):
+                            return Response({
+                                'error': 'Break periods must include period, duration, and name'
+                            }, status=status.HTTP_400_BAD_REQUEST)
+                        
+                        if bp['period'] < 1 or bp['period'] > school.total_periods_per_day:
+                            return Response({
+                                'error': f"Break period {bp['period']} must be between 1 and {school.total_periods_per_day}"
+                            }, status=status.HTTP_400_BAD_REQUEST)
+                        
+                        if bp['duration'] < 5 or bp['duration'] > 60:
+                            return Response({
+                                'error': f"Break duration must be between 5 and 60 minutes"
+                            }, status=status.HTTP_400_BAD_REQUEST)
+                
+                school = serializer.save()
+                return Response({
+                    'message': 'Period timing configuration updated successfully',
+                    'data': self.get_serializer(school).data
+                })
+            
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+            
+        except SchoolProfile.DoesNotExist:
+            return Response({
+                'error': 'School profile not found'
+            }, status=status.HTTP_404_NOT_FOUND)
+        except Exception as e:
+            return Response({
+                'error': f'Failed to update period timing: {str(e)}'
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)

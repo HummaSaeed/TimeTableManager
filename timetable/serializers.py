@@ -46,6 +46,7 @@ class SchoolProfileSerializer(serializers.ModelSerializer):
             'school_end_time', 'number_of_classes', 'sections_per_class',
             'period_duration_minutes', 'total_periods_per_day', 'break_time',
             'friday_closing_time', 'working_days', 'academic_year', 'timezone',
+            'break_periods', 'assembly_time', 'assembly_duration_minutes',
             'created_at', 'updated_at'
         ]
         read_only_fields = ['id', 'created_at', 'updated_at']
@@ -53,7 +54,10 @@ class SchoolProfileSerializer(serializers.ModelSerializer):
     def validate_school_code(self, value):
         # Check if school_code is unique (excluding current instance if updating)
         user = self.context['request'].user
-        if SchoolProfile.objects.filter(school_code=value).exclude(user=user).exists():
+        qs = SchoolProfile.objects.filter(school_code=value)
+        if self.instance:
+            qs = qs.exclude(pk=self.instance.pk)
+        if qs.exists():
             raise serializers.ValidationError("School code must be unique.")
         return value
 
@@ -114,9 +118,9 @@ class TeacherSerializer(serializers.ModelSerializer):
 
     def validate(self, attrs):
         # Validate class teacher fields
-        is_class_teacher = attrs.get('is_class_teacher', False)
-        class_teacher_class = attrs.get('class_teacher_class')
-        class_teacher_section = attrs.get('class_teacher_section')
+        is_class_teacher = attrs.get('is_class_teacher', getattr(self.instance, 'is_class_teacher', False))
+        class_teacher_class = attrs.get('class_teacher_class', getattr(self.instance, 'class_teacher_class', None))
+        class_teacher_section = attrs.get('class_teacher_section', getattr(self.instance, 'class_teacher_section', None))
 
         if is_class_teacher:
             if not class_teacher_class:
@@ -124,8 +128,9 @@ class TeacherSerializer(serializers.ModelSerializer):
             if not class_teacher_section:
                 raise serializers.ValidationError("Class teacher section must be specified when teacher is a class teacher.")
         else:
-            if class_teacher_class or class_teacher_section:
-                raise serializers.ValidationError("Class teacher fields should not be specified when teacher is not a class teacher.")
+            # If not class teacher, ignore class_teacher_* fields
+            attrs.pop('class_teacher_class', None)
+            attrs.pop('class_teacher_section', None)
 
         # Validate email uniqueness
         email = attrs.get('email')
@@ -161,6 +166,14 @@ class TeacherSerializer(serializers.ModelSerializer):
         validated_data.pop('generated_password', None)
         
         return super().create(validated_data)
+
+    def update(self, instance, validated_data):
+        # If toggled off class teacher, clear class fields on instance
+        is_class_teacher = validated_data.get('is_class_teacher', instance.is_class_teacher)
+        if not is_class_teacher:
+            validated_data['class_teacher_class'] = None
+            validated_data['class_teacher_section'] = None
+        return super().update(instance, validated_data)
 
     def generate_secure_password(self):
         """Generate a secure random password"""
@@ -318,7 +331,8 @@ class TimeTableSlotSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'school', 'school_name', 'class_obj', 'class_name', 'class_section',
             'subject', 'subject_name', 'teacher', 'teacher_name', 'day', 'period_number',
-            'academic_year', 'is_active', 'created_at', 'updated_at'
+            'academic_year', 'is_active', 'period_start_time', 'period_end_time',
+            'is_break_period', 'break_name', 'created_at', 'updated_at'
         ]
         read_only_fields = ['id', 'school', 'created_at', 'updated_at']
 
@@ -367,7 +381,8 @@ class TimeTableSlotListSerializer(serializers.ModelSerializer):
         model = TimeTableSlot
         fields = [
             'id', 'class_name', 'class_section', 'subject_name', 'teacher_name',
-            'day', 'period_number', 'is_active', 'created_at'
+            'day', 'period_number', 'is_active', 'period_start_time', 'period_end_time',
+            'is_break_period', 'break_name', 'created_at'
         ]
         read_only_fields = ['id', 'created_at']
 
